@@ -27,7 +27,7 @@ export function isOriginAllowed(request: Request): boolean {
   const originHeader = request.headers.get("origin");
 
   if (!originHeader) {
-    return true;
+    return false;
   }
 
   return configuredOrigins.includes(originHeader);

@@ -1,13 +1,91 @@
 import { NextResponse } from "next/server";
 import type Stripe from "stripe";
-import { corsHeaders, isOriginAllowed, jsonError } from "@/lib/cors";
+import { corsHeaders, jsonError } from "@/lib/cors";
 import { getStripeClient } from "@/lib/stripe";
 
 export const runtime = "nodejs";
+const MAX_WEBHOOK_BODY_BYTES = 256 * 1024;
+
+interface ParsedContentLength {
+  bytes: number | null;
+  invalid: boolean;
+}
+
+type BodyReadResult = { ok: true; body: string } | { ok: false; reason: "too_large" | "invalid" };
 
 function getWebhookSecret(): string | null {
   const secret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
   return secret && secret.length > 0 ? secret : null;
+}
+
+function parseContentLength(headerValue: string | null): ParsedContentLength {
+  if (headerValue === null) {
+    return { bytes: null, invalid: false };
+  }
+
+  const trimmed = headerValue.trim();
+
+  if (!/^\d+$/.test(trimmed)) {
+    return { bytes: null, invalid: true };
+  }
+
+  const bytes = Number.parseInt(trimmed, 10);
+
+  if (!Number.isSafeInteger(bytes)) {
+    return { bytes: null, invalid: true };
+  }
+
+  return { bytes, invalid: false };
+}
+
+async function readRequestBodyWithLimit(request: Request, maxBytes: number): Promise<BodyReadResult> {
+  const reader = request.body?.getReader();
+
+  if (!reader) {
+    return { ok: true, body: "" };
+  }
+
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      if (!value) {
+        continue;
+      }
+
+      totalBytes += value.byteLength;
+
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        return { ok: false, reason: "too_large" };
+      }
+
+      chunks.push(Buffer.from(value));
+    }
+  } catch {
+    return { ok: false, reason: "invalid" };
+  } finally {
+    reader.releaseLock();
+  }
+
+  return { ok: true, body: Buffer.concat(chunks, totalBytes).toString("utf8") };
+}
+
+function extractCustomerId(
+  customer: string | Stripe.Customer | Stripe.DeletedCustomer | null
+): string | null {
+  if (!customer) {
+    return null;
+  }
+
+  return typeof customer === "string" ? customer : customer.id;
 }
 
 async function safeListCheckoutLineItems(
@@ -31,18 +109,10 @@ async function safeListCheckoutLineItems(
 }
 
 export async function OPTIONS(request: Request): Promise<NextResponse> {
-  if (!isOriginAllowed(request)) {
-    return jsonError("Forbidden origin.", 403, request);
-  }
-
   return new NextResponse(null, { status: 204, headers: corsHeaders(request) });
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
-  if (!isOriginAllowed(request)) {
-    return jsonError("Forbidden origin.", 403, request);
-  }
-
   const webhookSecret = getWebhookSecret();
 
   if (!webhookSecret) {
@@ -55,7 +125,32 @@ export async function POST(request: Request): Promise<NextResponse> {
     return jsonError("Missing Stripe-Signature header.", 400, request);
   }
 
-  const rawBody = await request.text();
+  const contentLength = parseContentLength(request.headers.get("content-length"));
+
+  if (contentLength.invalid) {
+    return jsonError("Invalid Content-Length header.", 400, request);
+  }
+
+  if (contentLength.bytes !== null && contentLength.bytes > MAX_WEBHOOK_BODY_BYTES) {
+    return jsonError("Payload too large.", 413, request);
+  }
+
+  const bodyRead = await readRequestBodyWithLimit(request, MAX_WEBHOOK_BODY_BYTES);
+
+  if (!bodyRead.ok) {
+    if (bodyRead.reason === "too_large") {
+      return jsonError("Payload too large.", 413, request);
+    }
+
+    console.error(
+      JSON.stringify({
+        event: "webhook_body_read_failed"
+      })
+    );
+    return jsonError("Invalid webhook request body.", 400, request);
+  }
+
+  const rawBody = bodyRead.body;
 
   let event: Stripe.Event;
   const stripe = getStripeClient();
@@ -80,30 +175,19 @@ export async function POST(request: Request): Promise<NextResponse> {
       console.log(
         JSON.stringify({
           event: "checkout.session.completed",
+          eventId: event.id,
           sessionId: session.id,
+          sessionStatus: session.status,
+          paymentStatus: session.payment_status,
           amountTotal: session.amount_total,
           currency: session.currency,
-          email: session.customer_details?.email ?? null,
-          customerName: session.customer_details?.name ?? null,
-          customerPhone: session.customer_details?.phone ?? null,
-          shipping: session.shipping_details
-            ? {
-                name: session.shipping_details.name ?? null,
-                phone: session.shipping_details.phone ?? null,
-                address: session.shipping_details.address ?? null
-              }
-            : null,
+          customerId: extractCustomerId(session.customer),
           lineItems: lineItems
             ? lineItems.data.map((item) => ({
-                description: item.description,
                 quantity: item.quantity,
-                amountSubtotal: item.amount_subtotal,
-                amountTotal: item.amount_total,
-                currency: item.currency,
                 priceId: item.price?.id ?? null
               }))
-            : null,
-          metadata: session.metadata ?? {}
+            : null
         })
       );
 
@@ -115,10 +199,12 @@ export async function POST(request: Request): Promise<NextResponse> {
       console.log(
         JSON.stringify({
           event: "payment_intent.succeeded",
+          eventId: event.id,
           paymentIntentId: paymentIntent.id,
+          status: paymentIntent.status,
           amount: paymentIntent.amount,
           currency: paymentIntent.currency,
-          metadata: paymentIntent.metadata ?? {}
+          customerId: extractCustomerId(paymentIntent.customer)
         })
       );
 

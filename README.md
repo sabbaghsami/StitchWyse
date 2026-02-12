@@ -32,7 +32,7 @@ Required:
 
 Recommended:
 
-- `ALLOWED_ORIGIN` (one or more allowed origins, comma-separated, e.g. `https://your-site.framer.website`)
+- `ALLOWED_ORIGIN` (one or more allowed origins, comma-separated, e.g. `https://your-site.framer.website`; when set, `/api/checkout` rejects requests without an `Origin` header)
 
 Optional:
 
@@ -131,6 +131,7 @@ stripe trigger checkout.session.completed
 ```
 
 You should see structured JSON logs from the webhook handler in your terminal.
+Webhook processing is authenticated via Stripe signature verification, not browser origin checks.
 
 ## Vercel Deployment
 
@@ -160,5 +161,7 @@ You should see structured JSON logs from the webhook handler in your terminal.
 ## Security Notes
 
 - Secret keys are server-only.
-- Optional origin restriction via `ALLOWED_ORIGIN`.
+- Optional origin restriction via `ALLOWED_ORIGIN` on checkout endpoints.
 - Webhook signatures are verified using raw request body and `STRIPE_WEBHOOK_SECRET`.
+- Webhook request bodies are capped to prevent oversized payload abuse.
+- Webhook logs are intentionally minimal and exclude customer PII.
