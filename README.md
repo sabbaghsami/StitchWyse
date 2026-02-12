@@ -6,6 +6,7 @@ Minimal, production-oriented Stripe backend for a Framer storefront cart using N
 
 - `POST /api/checkout`
 - `POST /api/webhook`
+- `POST /api/custom-order`
 - `GET /api/health`
 
 ## Stack
@@ -39,6 +40,9 @@ Optional:
 - `DEFAULT_CURRENCY` (defaults to `gbp`, useful as project-level default metadata/config)
 - `ENFORCE_STRIPE_PRICE_ALLOWLIST` (defaults to `true` in production, `false` otherwise)
 - `ALLOWED_STRIPE_PRICE_IDS` (comma-separated Stripe Price IDs allowed for checkout, required when enforcement is enabled)
+- `RESEND_API_KEY` (required for `/api/custom-order` email delivery)
+- `ORDER_EMAIL` (recipient for custom-order submissions)
+- `TURNSTILE_SECRET_KEY` (recommended for public `/api/custom-order`; when set, requests must include a valid captcha token)
 
 ## Setup
 
@@ -154,6 +158,7 @@ Webhook processing is authenticated via Stripe signature verification, not brows
 - Call `POST /api/checkout` from your Framer code component with cart JSON.
 - Redirect the browser to the returned `url`.
 - Do not expose `STRIPE_SECRET_KEY` in client-side code.
+- For `POST /api/custom-order`, include `captchaToken` in the JSON body if `TURNSTILE_SECRET_KEY` is configured.
 - Reference implementation:
   - `/Users/sami.sabbagh/git/StitchWyse1/docs/framer-checkout-client.ts`
   - `/Users/sami.sabbagh/git/StitchWyse1/docs/go-live-checklist.md`
@@ -165,3 +170,4 @@ Webhook processing is authenticated via Stripe signature verification, not brows
 - Webhook signatures are verified using raw request body and `STRIPE_WEBHOOK_SECRET`.
 - Webhook request bodies are capped to prevent oversized payload abuse.
 - Webhook logs are intentionally minimal and exclude customer PII.
+- `POST /api/custom-order` is public by design; protect it with validation + rate limiting, and configure Turnstile (`TURNSTILE_SECRET_KEY`) for stronger bot resistance.
